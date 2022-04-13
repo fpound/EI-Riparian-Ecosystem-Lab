@@ -1,67 +1,63 @@
-#==================================================#
-#           Import Packages                        #
-#==================================================#
-
-
+#=============================================================================#
+#                          Import Packages                                    #
+#=============================================================================#
+import fiona, os, glob, rasterio, requests, shutil
 
 import numpy as np
 import pandas as pd
+
 from pysheds.grid import Grid
-
-import fiona
 import geopandas as gpd
-
-import os
-import glob
-import rasterio
-from rasterio.merge import merge
-from rasterio.fill import fillnodata
 from rasterio.mask import mask
-from rasterio.enums import ColorInterp
-
-
 from shapely.geometry import mapping, shape, Polygon
-
-
 from joblib import Parallel, delayed
-import warnings
-
-
-import requests
-import json
+from retry import retry
+from tqdm import tqdm
 
 import ee
 ee.Initialize(opt_url='https://earthengine-highvolume.googleapis.com')
 
-import shutil
-
-from retry import retry
-
-from tqdm import tqdm
 
 
 
 DataFolder = '/Volumes/Lightning Strike/EARTHSHOT_DATA/BRAT/Idaho/_NEW_DATA'
 InputData = '/Volumes/Lightning Strike/EARTHSHOT_DATA/BRAT/Idaho/Dams/02_Dams_Virtual_Census/Shapefiles/Beaver_Dams/Idaho_BeaverDams_Idaho.shp'
 
-#==================================================#
-#           Define Fuctions                        #
-#==================================================#
+
+#=============================================================================#
+#                          Define Fuctions                                    #
+#=============================================================================#
 
 
 
+# Returns a Geodataframe from either .tif or .shp.
+# This is then used in otehr functions which defines a bounding box etc. 
+def makeExtent(InputData):
 
+    if InputData.endswith('.shp'):
+        extent = makeGDF(InputData)
+
+    elif InputData.endswith('.tif'):
+        extent = makeExtentPoly(InputData)
+
+    else:
+        print("Data type not known. Must be a .shp or .tif")
+    return extent
+
+
+
+# Returns GDF from .shp
 def makeGDF(shape_path):
     shape_gdf = gpd.read_file(shape_path)
     return shape_gdf
 
 
 
+# Returns GDF from .tif
 def makeExtentPoly(raster_path):
     
     raster = rasterio.open(raster_path)
     raster_name = os.path.split(InputData)[-1].split('.')[0]
-    
     
     left = raster.bounds[0] 
     lower = raster.bounds[1]
@@ -82,44 +78,9 @@ def makeExtentPoly(raster_path):
 
 
 
-def makeExtent_fromSHP(shp_path):
-
-    shp = gpd.read_file(shp_path)
-    shp_name = os.path.split(InputData)[-1].split('.')[0]
-    
-    
-    left = shp.total_bounds[0] 
-    lower = shp.total_bounds[1]
-    right = shp.total_bounds[2]
-    upper = shp.total_bounds[3]
-
-    # Set raster bounding box
-    shp_box = [[left, upper], [right, upper], [right, lower], [left, lower]]
-
-    # define the geometry
-    shp_poly = Polygon(shp_box)
-    d = {'name':[f'{shp_name}',], 'geometry': [shp_poly,]}
-
-    # make the geodataframe
-    shp_extent = gpd.GeoDataFrame(d, crs=str(shp.crs))
-    
-    return shp_extent
 
 
-
-def makeExtent(InputData):
-
-    if InputData.endswith('.shp'):
-        extent = makeGDF(InputData)
-
-    elif InputData.endswith('.tif'):
-        extent = makeExtentPoly(InputData)
-
-    else:
-        print("Data type not known. Must be a .shp or .tif")
-    return extent
-
-
+## This is a key function which downloads a DEM from the USGS National Map.
 
 def Download_DEM(path, Newest=True):
     
@@ -163,8 +124,6 @@ def Download_DEM(path, Newest=True):
             DownloadListNewest.append(max(newestFile))
         downloadList = DownloadListNewest
 
-
-
     fileCounter = 1
     RastersList = []
 
@@ -191,15 +150,12 @@ def Download_DEM(path, Newest=True):
 
 
 
+## Another key function, this processes a DEM using watershed analysis functions
+## powered by the Pysheds package. For the purposes of EI Riparian scripts,
+## this function returns a shp file path of the stream vector network.
+
 def watershed_preProcessing(dem_path):
 
-    DEM_folder  = os.path.splitext(dem_path)[0].split('/')[0]
-    #img_name = os.path.splitext(dem_path)[0].split('/')[1]
-    #fdir_dir = f'{DEM_folder}/{img_name}_fdir'
- 
-    #if not os.path.isdir(fdir_dir):
-    #    os.mkdir(fdir_dir)
-        
     
     DEM_name = dem_path.split('/')[-1].split('.tif')[0]
 
@@ -233,10 +189,6 @@ def watershed_preProcessing(dem_path):
     # Compute flow direction based on corrected DEM
     fdir = grid.flowdir(inflated_dem)
     
-#    fdir_path = 'asdf_fdir.tiff'
-    
-#    grid.to_raster(fdir, fdir_path, dtype=np.uint8)
-    
     acc = grid.accumulation(fdir)
     branches = grid.extract_river_network(fdir, acc > 2500)
     
@@ -254,17 +206,23 @@ def watershed_preProcessing(dem_path):
     return shp_path
 
 
+
+
+## This function takes the previous stream network lines, 
+## and makes points along those streams. The second parameter is the distance
+## in meters between each point along the lines.  
+
+
 def makePointsFromLines(Line_SHP, Distance_Points_M):
     
     DEM_name = os.path.split(Line_SHP)[-1].split('.shp')[0]
 
     shp_name = os.path.split(Line_SHP)[-1].split('.shp')[0]
-
     
     SHP = gpd.read_file(Line_SHP)
     
     ## need to reproject for to the points to work correctly
-    ## need to come up with a way to identify the epsg programatically
+    ## Should come up with a way to identify the epsg programatically
     
     rePro_shp = SHP.to_crs("EPSG:3857")
     rePro_shp_path = f'{shp_name}_repro.shp'
@@ -278,7 +236,7 @@ def makePointsFromLines(Line_SHP, Distance_Points_M):
 
     crs = lines.crs
     points_path = f'POINTS/{DEM_name}_Points.shp'
-    points_repro_path = f'POINTS/{DEM_name}_Points_repro.shp'
+
     
     
     with fiona.open(points_path,
@@ -297,20 +255,25 @@ def makePointsFromLines(Line_SHP, Distance_Points_M):
                 output.write({'geometry':mapping(point),'properties': {'id':i}}) 
     
     
-        
     for filename2 in glob.glob(f"{rePro_shp_path[:-4]}*"):
         os.remove(filename2)
     
     points_gdf = gpd.read_file(points_path)
     points_repro = points_gdf.to_crs("EPSG:4269")
     points_repro['id'] = np.arange(len(points_repro))
-
     
     return points_repro, points_path
 
 
 
-def points_toNAIP_Chips(points, inputName, optString=""):
+
+
+## This function uses Google Earth Engine to download NAIP image chips.
+## The dates must be defined in the code itself.  
+
+
+
+def points_toNAIP_Chips(points, inputName, DEM_name, optString=""):
     if points.empty:
         return
     #points.to_crs(DEM.crs)
@@ -344,7 +307,7 @@ def points_toNAIP_Chips(points, inputName, optString=""):
     image = (
     ee.ImageCollection('USDA/NAIP/DOQQ')
     .filterBounds(region)
-    .filterDate('2018-01-01', '2019-12-31')  ### need to figure out how to define the years
+    .filterDate('2018-01-01', '2019-12-31')  ### need to figure out how to properly define the years
     .mosaic()
     .clip(region)
     .select('R', 'G', 'B', 'N')
@@ -403,7 +366,6 @@ def points_toNAIP_Chips(points, inputName, optString=""):
         return out_dir
         #print("Done: ", basename)
 
-        
 
     Parallel(n_jobs=40, prefer="threads")(delayed(getResult)(i, points_gee[i]) for i in tqdm(range(0, len(points_gee))))
     #for i in tqdm(range(0, len(points_gee))):
@@ -416,6 +378,9 @@ def points_toNAIP_Chips(points, inputName, optString=""):
 
 
 
+
+## Simple function to add specifically named folders into an identified folder
+
 def change_dir(DataFolder):
     os.chdir(DataFolder)
     dirList = ['DEM', 'NAIP', 'StreamVectors', 'POINTS', 'OUTPUT']
@@ -424,18 +389,21 @@ def change_dir(DataFolder):
             os.mkdir(x)
 
             
+
+
+
+## This function devides up a raster (large DEM in this case) into tiles.
+## The num variable is used to identify the number of tiles per side,
+## so if num=4, then there will be 16 total tiles.  
+
             
 def MakeTiles(DEM_path, num):
     #get names of folder and DEM
     DEM_name = os.path.splitext(DEM_path)[0].split('/')[-1]
-    DEM_folder  = 'DEM'
+
     
     DEM = rasterio.open(DEM_path)
-    
-    #tiles_dir = f'{DEM_folder}/{DEM_name}_tiles'
-    
-    #if not os.path.isdir(tiles_dir):
-    #    os.mkdir(tiles_dir)
+
     
     # Set initial state
     left_bound = DEM.bounds[0] 
@@ -475,9 +443,6 @@ def MakeTiles(DEM_path, num):
     
         upper -= new_length
         counter_x += 1
-    
-        
-        
         
     # make a list to catch each data frame
     geoSeries_list = []
@@ -538,6 +503,12 @@ def MakeTiles(DEM_path, num):
 
 
 
+
+## This function will crop a large raster (for instance a downloaded DEM) 
+## using a shapefile's bounds to speed up processsing.  
+
+
+
 def crop_byBoundary(raster_path, cropBoundary_SHP):
     
     raster = rasterio.open(raster_path)
@@ -588,6 +559,11 @@ def crop_byBoundary(raster_path, cropBoundary_SHP):
     
 
 
+## This function removes older versions of the DEMs downloaded from the 
+## National Map. It requires dates to be included in the file name
+## and deletes the older names.  
+
+
 def deleteOldFiles(folder):
     dirFolder = os.path.join((os.getcwd()),folder)
 
@@ -612,6 +588,36 @@ def deleteOldFiles(folder):
 
 
 
+
+
+#=============================================================================#
+
+## This function isn't used.  It's a more complicated version of above.
+## It might be more useful with very large datasets and memory management.  
+
+def makeExtent_fromSHP(shp_path):
+
+    shp = gpd.read_file(shp_path)
+    shp_name = os.path.split(InputData)[-1].split('.')[0]
+    
+    left = shp.total_bounds[0] 
+    lower = shp.total_bounds[1]
+    right = shp.total_bounds[2]
+    upper = shp.total_bounds[3]
+
+    # Set raster bounding box
+    shp_box = [[left, upper], [right, upper], [right, lower], [left, lower]]
+
+    # define the geometry
+    shp_poly = Polygon(shp_box)
+    d = {'name':[f'{shp_name}',], 'geometry': [shp_poly,]}
+
+    # make the geodataframe
+    shp_extent = gpd.GeoDataFrame(d, crs=str(shp.crs))
+    
+    return shp_extent
+
+#=============================================================================#
 
 
 
