@@ -307,7 +307,7 @@ def points_toNAIP_Chips(points, inputName, DEM_name, optString=""):
     image = (
     ee.ImageCollection('USDA/NAIP/DOQQ')
     .filterBounds(region)
-    .filterDate('2018-01-01', '2019-12-31')  ### need to figure out how to properly define the years
+    .filterDate('2016-01-01', '2017-12-31')  ### need to figure out how to properly define the years
     .mosaic()
     .clip(region)
     .select('R', 'G', 'B', 'N')
