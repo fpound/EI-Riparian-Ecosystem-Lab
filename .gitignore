@@ -1,6 +1,17 @@
 
 .DS_Store
+
 _OLD-Original.ipynb
+
+
+DATA/DEM/
+DATA/NAIP
+DATA/OUTPUT
+DATA/POINTS
+DATA/StreamVectors
+
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
